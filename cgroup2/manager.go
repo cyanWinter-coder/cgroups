@@ -151,24 +151,33 @@ type Value struct {
 	value    interface{}
 }
 
-// write the value to the full, absolute path, of a unified hierarchy
-func (c *Value) write(path string, perm os.FileMode) error {
-	var data []byte
+// bytes encodes the value the same way write does, without touching the
+// filesystem. It is shared by the direct write path and the transactional
+// update path.
+func (c *Value) bytes() ([]byte, error) {
 	switch t := c.value.(type) {
 	case uint64:
-		data = []byte(strconv.FormatUint(t, 10))
+		return []byte(strconv.FormatUint(t, 10)), nil
 	case uint16:
-		data = []byte(strconv.FormatUint(uint64(t), 10))
+		return []byte(strconv.FormatUint(uint64(t), 10)), nil
 	case int64:
-		data = []byte(strconv.FormatInt(t, 10))
+		return []byte(strconv.FormatInt(t, 10)), nil
 	case []byte:
-		data = t
+		return t, nil
 	case string:
-		data = []byte(t)
+		return []byte(t), nil
 	case CPUMax:
-		data = []byte(t)
+		return []byte(t), nil
 	default:
-		return ErrInvalidFormat
+		return nil, ErrInvalidFormat
+	}
+}
+
+// write the value to the full, absolute path, of a unified hierarchy
+func (c *Value) write(path string, perm os.FileMode) error {
+	data, err := c.bytes()
+	if err != nil {
+		return err
 	}
 
 	return os.WriteFile(
@@ -250,6 +259,24 @@ func Load(group string, opts ...InitOpts) (*Manager, error) {
 type Manager struct {
 	unifiedMountpoint string
 	path              string
+
+	// mu serializes Update and Delete on the same manager so that a
+	// resource update (including its rollback) can never race with the
+	// removal of the cgroup directory.
+	mu sync.Mutex
+	// ops targets the cgroup directory. It defaults to the real hierarchy
+	// and is overridden in tests to exercise the transactional logic
+	// against a plain directory.
+	ops fsOps
+}
+
+// fsOpsLocked returns the file operations handle; the caller must already
+// hold c.mu.
+func (c *Manager) fsOpsLocked() fsOps {
+	if c.ops != nil {
+		return c.ops
+	}
+	return dirFSOps{dir: c.path}
 }
 
 func setResources(path string, resources *Resources) error {
@@ -311,8 +338,24 @@ func (c *Manager) Controllers() ([]string, error) {
 	return strings.Fields(string(b)), nil
 }
 
+// Update changes the cgroup resources with transactional semantics: every
+// affected control file is snapshotted before it is written, and if any write
+// fails the already applied writes are restored in reverse order. A
+// *RollbackError is returned when the rollback itself could not fully restore
+// the previous state; it wraps the original update error and lists the files
+// whose values may still be applied.
+//
+// A nil resources pointer (or one without any values) leaves the cgroup
+// untouched and returns nil, matching the previous behavior.
+//
+// Update and Delete on the same manager are serialized.
 func (c *Manager) Update(resources *Resources) error {
-	return setResources(c.path, resources)
+	if resources == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return updateResources(c.fsOpsLocked(), resources)
 }
 
 type ControllerToggle int
@@ -497,7 +540,11 @@ func (c *Manager) fallbackKill() error {
 	return nil
 }
 
+// Delete removes the cgroup. It is serialized with Update on the same manager
+// so a rollback cannot run against a directory that is being removed.
 func (c *Manager) Delete() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	// Kernel prevents cgroups with running process from being removed,
 	// check the tree is empty.
 	//
