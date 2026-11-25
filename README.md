@@ -202,6 +202,37 @@ if err != nil {
 ```
 
 
+### Migrate a batch and account for every process
+
+`MigrateTo` records the source and target PID sets before touching any
+process, moves each source PID independently, and then re-reads both groups to
+verify final ownership. A PID that exits during the batch is reported as
+`skipped`; other per-PID problems are reported as `failed` and do not stop the
+rest of the batch. A full or unwritable target is returned before the first
+`AddProc` call.
+
+```go
+report, err := source.MigrateTo(destination)
+if err != nil {
+    // Setup/preflight failure: no process was migrated by this call.
+    return err
+}
+
+fmt.Println(report.Succeeded)
+fmt.Println(report.Skipped)
+fmt.Println(report.Failed)
+if report.HasFailures() {
+    return report.Err()
+}
+```
+
+New source or target PIDs that were not present in the initial snapshots are
+exposed in `SourceAppeared`, `TargetAppeared`, and `TargetExternal`, so
+concurrent joins or other operators do not distort the migration totals.
+The existing `AddProc` and `MoveTo` methods retain their signatures and
+behavior. `cgctl migrate SOURCE DESTINATION --pretty` prints the same report as
+JSON.
+
 ### Get and set cgroup type
 ```go
 m, err := cgroup2.LoadSystemd("/", "my-cgroup-abc.slice")

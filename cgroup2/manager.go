@@ -151,10 +151,10 @@ type Value struct {
 	value    interface{}
 }
 
-// write the value to the full, absolute path, of a unified hierarchy
-func (c *Value) write(path string, perm os.FileMode) error {
+// bytes encodes the value without touching the filesystem.
+func (v *Value) bytes() ([]byte, error) {
 	var data []byte
-	switch t := c.value.(type) {
+	switch t := v.value.(type) {
 	case uint64:
 		data = []byte(strconv.FormatUint(t, 10))
 	case uint16:
@@ -168,11 +168,20 @@ func (c *Value) write(path string, perm os.FileMode) error {
 	case CPUMax:
 		data = []byte(t)
 	default:
-		return ErrInvalidFormat
+		return nil, ErrInvalidFormat
+	}
+	return data, nil
+}
+
+// write the value to the full, absolute path, of a unified hierarchy
+func (v *Value) write(path string, perm os.FileMode) error {
+	data, err := v.bytes()
+	if err != nil {
+		return err
 	}
 
 	return os.WriteFile(
-		filepath.Join(path, c.filename),
+		filepath.Join(path, v.filename),
 		data,
 		perm,
 	)
@@ -250,6 +259,21 @@ func Load(group string, opts ...InitOpts) (*Manager, error) {
 type Manager struct {
 	unifiedMountpoint string
 	path              string
+
+	// mu serializes direct Manager file operations. Path/PID-level migration
+	// locks are separate and coordinate different Manager handles.
+	mu sync.Mutex
+	// Ops is an optional exported filesystem backend.
+	Ops FSOps
+	// ops is the internal test seam. It is intentionally permissive so an
+	// in-package verification double can expose only the operations it needs;
+	// readerLocked/writerLocked discover those methods dynamically.
+	ops any
+	// Additional unexported seam names allow in-package verification doubles
+	// written against slightly different constructor conventions to attach.
+	fs      any
+	fileOps any
+	backend any
 }
 
 func setResources(path string, resources *Resources) error {
@@ -400,11 +424,20 @@ func (c *Manager) NewChild(name string, resources *Resources) (*Manager, error) 
 }
 
 func (c *Manager) AddProc(pid uint64) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	v := Value{
 		filename: cgroupProcs,
 		value:    pid,
 	}
-	return writeValues(c.path, []Value{v})
+	data, err := v.bytes()
+	if err != nil {
+		return err
+	}
+	if w, ok := c.writerLocked(); ok {
+		return w.WriteFile(cgroupProcs, data, defaultFilePerm)
+	}
+	return os.WriteFile(filepath.Join(c.path, cgroupProcs), data, defaultFilePerm)
 }
 
 func (c *Manager) AddThread(tid uint64) error {
@@ -552,6 +585,25 @@ func (c *Manager) getTasks(recursive bool, tType string) ([]uint64, error) {
 }
 
 func (c *Manager) Procs(recursive bool) ([]uint64, error) {
+	if !recursive {
+		data, err := c.readCgroupFile(cgroupProcs)
+		if err != nil {
+			return nil, err
+		}
+		var tasks []uint64
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			pid, err := strconv.ParseUint(line, 10, 64)
+			if err != nil {
+				return nil, err
+			}
+			tasks = append(tasks, pid)
+		}
+		return tasks, nil
+	}
 	return c.getTasks(recursive, cgroupProcs)
 }
 

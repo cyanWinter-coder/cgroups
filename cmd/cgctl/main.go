@@ -49,6 +49,7 @@ func main() {
 		newCommand,
 		delCommand,
 		listCommand,
+		migrateCommand,
 		listControllersCommand,
 		statCommand,
 		newSystemdCommand,
