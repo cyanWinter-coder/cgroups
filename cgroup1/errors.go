@@ -29,6 +29,9 @@ var (
 	ErrMemoryNotSupported       = errors.New("cgroups: memory cgroup not supported on this system")
 	ErrCgroupDeleted            = errors.New("cgroups: cgroup deleted")
 	ErrNoCgroupMountDestination = errors.New("cgroups: cannot find cgroup mount destination")
+	// ErrPathEscape is returned when a nested suffix would resolve a cgroup
+	// path outside its controller hierarchy root.
+	ErrPathEscape = errors.New("cgroups: path escapes the cgroup hierarchy root")
 )
 
 // ErrorHandler is a function that handles and acts on errors

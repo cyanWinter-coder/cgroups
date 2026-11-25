@@ -144,6 +144,53 @@ if cgroups.Mode() == cgroups.Unified {
 }
 ```
 
+### Resolve group paths across mixed v1/v2 fleets
+
+Fleets that are mid-migration contain hosts on cgroup v1, v2 and hybrid
+hierarchies at the same time. `cgroups.Probe` detects the hierarchy a host
+actually uses and `cgroups.Resolver` turns one logical group name into the
+real on-disk path of whichever hierarchy is mounted, with caching and
+hierarchy-switch handling built in.
+
+```go
+// Probe once at startup; the result is cached and repeated probing only
+// performs read-only statfs calls with no side effects.
+info, err := cgroups.Probe()
+switch info.Mode {
+case cgroups.Unified:
+	// info.V2Mountpoint is the unified mount point
+case cgroups.Legacy, cgroups.Hybrid:
+	// info.V1Mountpoint is the shared root of the v1 controllers
+}
+
+resolver, err := cgroups.NewResolver()
+
+// Same logical name, resolved to the real path of each hierarchy.
+v2Path, err := resolver.ResolveV2("/scheduler/tenant-a", "worker-1")
+v1Path, err := resolver.ResolveV1("memory", "/scheduler/tenant-a", "worker-1")
+
+// Pid and nested-suffix inputs work on both hierarchies.
+v1ByPid, v2ByPid, err := resolver.ResolvePid(pid, "worker-1")
+
+// After a host switches hierarchy, refresh instead of re-caching stale
+// assumptions; stale resolutions return a cgroups.StalePathError carrying
+// the usable path on the new hierarchy.
+if _, err := resolver.Refresh(); err != nil {
+	return err
+}
+_, err = resolver.ResolveV1("memory", "/scheduler/tenant-a", "")
+var stale *cgroups.StalePathError
+if errors.As(err, &stale) {
+	usePath := stale.NewPath // valid on the hierarchy now in use
+}
+```
+
+Path resolution rejects traversal outside the hierarchy root
+(`cgroups.ErrPathEscape`) and symbolic links whose targets escape the root
+(`cgroups.ErrSymlinkEscape`). The existing `cgroup1.Path`, `cgroup1.PidPath`,
+`cgroup2.NestedGroupPath` and `cgroup2.PidGroupPath` keep their signatures and
+apply the same checks.
+
 ### Create a new cgroup
 
 This creates a new systemd v2 cgroup slice. Systemd slices consider ["-" a special character](https://www.freedesktop.org/software/systemd/man/systemd.slice.html),

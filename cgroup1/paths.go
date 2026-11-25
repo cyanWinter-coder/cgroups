@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 )
 
 type Path func(subsystem Name) (string, error)
@@ -83,10 +84,27 @@ func existingPath(paths map[string]string, suffix string) Path {
 			}
 		}
 		if suffix != "" {
+			// Reject traversal segments before joining: filepath.Join
+			// would clean "../" away and hide the escape attempt.
+			for _, segment := range strings.Split(suffix, string(filepath.Separator)) {
+				if segment == ".." || segment == "." {
+					return "", ErrPathEscape
+				}
+			}
 			return filepath.Join(root, suffix), nil
 		}
 		return root, nil
 	}
+}
+
+// withinRoot reports whether cleaned path equals root or stays below it.
+func withinRoot(root, path string) bool {
+	root = filepath.Clean(root)
+	path = filepath.Clean(path)
+	if path == root {
+		return true
+	}
+	return strings.HasPrefix(path, root+string(filepath.Separator))
 }
 
 func subPath(path Path, subName string) Path {

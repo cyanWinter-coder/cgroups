@@ -42,3 +42,31 @@ func TestVerifyGroupPath(t *testing.T) {
 		}
 	}
 }
+
+func TestJoinNestedPath(t *testing.T) {
+	cases := []struct {
+		name    string
+		group   string
+		suffix  string
+		want    string
+		wantErr bool
+	}{
+		{name: "plain nesting", group: "/user.slice/session.scope", suffix: "child", want: "/user.slice/session.scope/child"},
+		{name: "empty suffix", group: "/user.slice/session.scope", suffix: "", want: "/user.slice/session.scope"},
+		{name: "nested suffix", group: "/a", suffix: "b/c", want: "/a/b/c"},
+		{name: "traversal rejected", group: "/a", suffix: "../../etc", wantErr: true},
+		{name: "dot segments rejected", group: "/a", suffix: "./b", wantErr: true},
+		{name: "unclean group rejected", group: "/a/../b", suffix: "c", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := joinNestedPath(tc.group, tc.suffix)
+			if tc.wantErr {
+				assert.Error(t, err)
+				return
+			}
+			assert.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}

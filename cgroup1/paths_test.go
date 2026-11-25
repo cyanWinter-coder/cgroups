@@ -123,3 +123,46 @@ func TestSystemd240(t *testing.T) {
 		t.Fatalf("expected %q, got %q", unifiedExpected, unified)
 	}
 }
+
+func TestExistingPathSuffix(t *testing.T) {
+	if isUnified {
+		t.Skipf("requires the system to be running in legacy mode")
+	}
+	paths, err := ParseCgroupFile("/proc/self/cgroup")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Normal nested suffix stays beneath the controller path.
+	path := existingPath(paths, "worker-1")
+	p, err := path("devices")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(p, "/worker-1") {
+		t.Fatalf("nested path %q should end with the suffix", p)
+	}
+}
+
+func TestWithinRoot(t *testing.T) {
+	const root = "/sys/fs/cgroup/memory"
+	inside := []string{
+		root,
+		filepath.Join(root, "a", "b"),
+		filepath.Join(root, "worker-1"),
+	}
+	outside := []string{
+		"/etc/passwd",
+		"/sys/fs/cgroup/memory-evil/x", // prefix sharing a basename must not match
+		filepath.Clean(filepath.Join(root, "..", "..", "..", "etc")),
+	}
+	for _, p := range inside {
+		if !withinRoot(root, p) {
+			t.Errorf("expected %q to be within %q", p, root)
+		}
+	}
+	for _, p := range outside {
+		if withinRoot(root, p) {
+			t.Errorf("expected %q to be outside %q", p, root)
+		}
+	}
+}

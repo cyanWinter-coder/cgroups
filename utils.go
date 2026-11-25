@@ -21,12 +21,10 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 
 	"github.com/moby/sys/userns"
-	"golang.org/x/sys/unix"
 )
 
 var (
@@ -50,26 +48,20 @@ const (
 	Unified
 )
 
-// Mode returns the cgroups mode running on the host
+// Mode returns the cgroups mode running on the host.
+//
+// The detection shares the process-wide cache used by [Probe]: repeated
+// calls perform the statfs inspection only on the first call and never
+// mutate host state. Use [Probe] with [WithForceRefresh] to re-detect after
+// a hierarchy switch.
 func Mode() CGMode {
 	checkMode.Do(func() {
-		var st unix.Statfs_t
-		if err := unix.Statfs(unifiedMountpoint, &st); err != nil {
+		info, err := Probe()
+		if err != nil {
 			cgMode = Unavailable
 			return
 		}
-		switch st.Type {
-		case unix.CGROUP2_SUPER_MAGIC:
-			cgMode = Unified
-		default:
-			cgMode = Legacy
-			if err := unix.Statfs(filepath.Join(unifiedMountpoint, "unified"), &st); err != nil {
-				return
-			}
-			if st.Type == unix.CGROUP2_SUPER_MAGIC {
-				cgMode = Hybrid
-			}
-		}
+		cgMode = info.Mode
 	})
 	return cgMode
 }

@@ -29,7 +29,7 @@ func NestedGroupPath(suffix string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(path, suffix), nil
+	return joinNestedPath(path, suffix)
 }
 
 // PidGroupPath will return the correct cgroup paths for an existing process running inside a cgroup
@@ -37,6 +37,34 @@ func NestedGroupPath(suffix string) (string, error) {
 func PidGroupPath(pid int) (string, error) {
 	p := fmt.Sprintf("/proc/%d/cgroup", pid)
 	return parseCgroupFile(p)
+}
+
+// joinNestedPath appends a nested suffix to a parsed cgroup path. Both
+// inputs are validated so a malicious or corrupted suffix cannot escape the
+// cgroup hierarchy (for example "../../etc" is rejected) instead of being
+// silently normalized away by [filepath.Join].
+func joinNestedPath(group, suffix string) (string, error) {
+	if err := VerifyGroupPath(group); err != nil {
+		return "", err
+	}
+	if suffix == "" {
+		return group, nil
+	}
+	if filepath.IsAbs(suffix) {
+		return "", fmt.Errorf("%w: nested suffix %q must be relative", ErrInvalidGroupPath, suffix)
+	}
+	// Validate the un-joined suffix: filepath.Join would clean "../" away
+	// and hide the traversal, so inspect the raw segments first.
+	for _, segment := range strings.Split(suffix, string(filepath.Separator)) {
+		if segment == ".." || segment == "." {
+			return "", ErrInvalidGroupPath
+		}
+	}
+	joined := filepath.Join(group, suffix)
+	if err := VerifyGroupPath(joined); err != nil {
+		return "", err
+	}
+	return joined, nil
 }
 
 // VerifyGroupPath verifies the format of group path string g.
