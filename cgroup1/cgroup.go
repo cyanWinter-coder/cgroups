@@ -28,6 +28,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/containerd/cgroups/v3/capabilities"
 	v1 "github.com/containerd/cgroups/v3/cgroup1/stats"
 
 	"github.com/opencontainers/runtime-spec/specs-go"
@@ -59,13 +60,23 @@ func New(path Path, resources *specs.LinuxResources, opts ...InitOpts) (Cgroup, 
 				}
 				continue
 			}
+			if config.policy == CapabilityPolicyDegrade && isCapabilityWriteError(err) {
+				if config.InitCheck != nil {
+					if skerr := config.InitCheck(s, path, err); skerr != nil && skerr != ErrIgnoreSubsystem {
+						return nil, skerr
+					}
+				}
+				continue
+			}
 			return nil, err
 		}
 		active = append(active, s)
 	}
 	return &cgroup{
-		path:       path,
-		subsystems: active,
+		path:          path,
+		subsystems:    active,
+		allSubsystems: subsystems,
+		policy:        config.policy,
 	}, nil
 }
 
@@ -115,17 +126,22 @@ func Load(path Path, opts ...InitOpts) (Cgroup, error) {
 		return nil, ErrCgroupDeleted
 	}
 	return &cgroup{
-		path:       path,
-		subsystems: activeSubsystems,
+		path:          path,
+		subsystems:    activeSubsystems,
+		allSubsystems: subsystems,
+		policy:        config.policy,
 	}, nil
 }
 
 type cgroup struct {
 	path Path
 
-	subsystems []Subsystem
-	mu         sync.Mutex
-	err        error
+	subsystems    []Subsystem
+	allSubsystems []Subsystem
+	policy        capabilities.Policy
+	lastReport    *capabilities.PolicyResult
+	mu            sync.Mutex
+	err           error
 }
 
 // New returns a new sub cgroup
@@ -142,8 +158,10 @@ func (c *cgroup) New(name string, resources *specs.LinuxResources) (Cgroup, erro
 		}
 	}
 	return &cgroup{
-		path:       path,
-		subsystems: c.subsystems,
+		path:          path,
+		subsystems:    c.subsystems,
+		allSubsystems: c.allSubsystems,
+		policy:        c.policy,
 	}, nil
 }
 
@@ -345,29 +363,26 @@ func (c *cgroup) Stat(handlers ...ErrorHandler) (*v1.Metrics, error) {
 	return stats, nil
 }
 
-// Update updates the cgroup with the new resource values provided
+// Update updates the cgroup with the new resource values provided.
+//
+// Requested resources for a controller that is not active return an error
+// instead of being silently skipped. Use UpdateWithPolicy with
+// CapabilityPolicyDegrade to continue while recording the limits that were
+// not applied.
 //
 // Be prepared to handle EBUSY when trying to update a cgroup with
 // live processes and other operations like Stats being performed at the
 // same time
 func (c *cgroup) Update(resources *specs.LinuxResources) error {
+	policy := c.policy
+	if policy == "" {
+		policy = CapabilityPolicyStrict
+	}
+	report, err := c.UpdateWithPolicy(resources, policy)
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.err != nil {
-		return c.err
-	}
-	for _, s := range c.subsystems {
-		if u, ok := s.(updater); ok {
-			sp, err := c.path(s.Name())
-			if err != nil {
-				return err
-			}
-			if err := u.Update(sp, resources); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
+	c.lastReport = report
+	c.mu.Unlock()
+	return err
 }
 
 // Processes returns the processes running inside the cgroup along

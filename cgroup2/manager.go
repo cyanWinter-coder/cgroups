@@ -180,8 +180,15 @@ func (c *Value) write(path string, perm os.FileMode) error {
 
 func writeValues(path string, values []Value) error {
 	for _, o := range values {
-		if err := o.write(path, defaultFilePerm); err != nil {
+		// Fail before writing when the target control file is absent or not
+		// writable. The subsequent write remains authoritative for errors
+		// that appear only at write time.
+		if err := ensureValueWritable(path, o.filename); err != nil {
 			return err
+		}
+		if err := o.write(path, defaultFilePerm); err != nil {
+			controller := ControllerForFile(o.filename)
+			return fmt.Errorf("cgroups: %s control file %s write failed: %w: %w", controller, o.filename, ErrControlFileNotWritable, err)
 		}
 	}
 	return nil

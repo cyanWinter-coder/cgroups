@@ -51,6 +51,7 @@ func main() {
 		listCommand,
 		listControllersCommand,
 		statCommand,
+		diagnoseCommand,
 		newSystemdCommand,
 		deleteSystemdCommand,
 	}

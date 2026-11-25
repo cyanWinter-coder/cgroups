@@ -18,6 +18,8 @@ package cgroup1
 
 import (
 	"errors"
+
+	"github.com/containerd/cgroups/v3/capabilities"
 )
 
 var (
@@ -37,12 +39,14 @@ type InitConfig struct {
 	// InitCheck can be used to check initialization errors from the subsystem
 	InitCheck InitCheck
 	hierarchy Hierarchy
+	policy    capabilities.Policy
 }
 
 func newInitConfig() *InitConfig {
 	return &InitConfig{
 		InitCheck: RequireDevices,
 		hierarchy: Default,
+		policy:    capabilities.PolicyStrict,
 	}
 }
 
@@ -62,7 +66,7 @@ func RequireDevices(s Subsystem, _ Path, _ error) error {
 	return ErrIgnoreSubsystem
 }
 
-// WithHierarchy sets a list of cgroup subsystems.
+// WithHiearchy sets a list of cgroup subsystems.
 // The default list is coming from /proc/self/mountinfo.
 func WithHierarchy(h Hierarchy) InitOpts {
 	return func(c *InitConfig) error {
@@ -70,6 +74,25 @@ func WithHierarchy(h Hierarchy) InitOpts {
 		return nil
 	}
 }
+
+// WithUpdatePolicy sets the default strict/degrade policy used by Update.
+func WithUpdatePolicy(policy capabilities.Policy) InitOpts {
+	return func(c *InitConfig) error {
+		c.policy = policy
+		return nil
+	}
+}
+
+// WithDegradedUpdates configures Update to skip unavailable controllers and
+// retain a report of unenforced limits instead of returning an error. It also
+// allows best-effort resource initialization to skip unavailable non-device
+// controllers when used with the default InitCheck.
+func WithDegradedUpdates() InitOpts {
+	return WithUpdatePolicy(capabilities.PolicyDegrade)
+}
+
+// WithDegradedStartup is an alias for WithDegradedUpdates.
+func WithDegradedStartup() InitOpts { return WithDegradedUpdates() }
 
 // WithHiearchy sets a list of cgroup subsystems. It is just kept for backward
 // compatibility and will be removed in v4.

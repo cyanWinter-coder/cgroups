@@ -144,6 +144,52 @@ if cgroups.Mode() == cgroups.Unified {
 }
 ```
 
+### Probe controller capabilities and degrade explicitly
+
+Kernel upgrades can leave an `io`/`blkio` or `rdma` hierarchy mounted without the
+control files required to enforce a requested limit. Probe once at startup and
+ship the JSON report to fleet diagnostics:
+
+```go
+report, err := cgroups.ProbeCapabilities()
+if err != nil {
+	return err
+}
+for _, controller := range report.Controllers {
+	fmt.Printf("%s available=%v writable=%v mount=%s version=%d reason=%s\n",
+		controller.Name, controller.Available, controller.Writable,
+		controller.Mountpoint, controller.HierarchyVersion, controller.MissingReason)
+}
+data, _ := report.JSON() // machine-readable diagnostics
+```
+
+The probe uses `stat`, `access(2)`, and mount-table parsing only; it never
+writes to a cgroup hierarchy. `blkio` (cgroup v1) and `io` (cgroup v2) are
+reported under the same canonical `io` identity while retaining the kernel name
+and aliases.
+
+Resource writers preflight their target files and return an error wrapping
+`cgroups.ErrCapabilityFileNotWritable` when a requested control file cannot be
+used. To continue startup in degraded mode, opt into the degrade policy and
+record the limits that were not enforced:
+
+```go
+result, err := manager.UpdateWithPolicy(resources, cgroup2.CapabilityPolicyDegrade)
+if err != nil {
+	return err
+}
+for _, missing := range result.MissingLimits {
+	log.Warnf("cgroup limit not enforced: %s/%s: %s",
+		missing.Controller, missing.File, missing.Reason)
+}
+```
+
+For cgroup v1 handles returned as the `Cgroup` interface, use
+`cgroup1.UpdateWithPolicy(cg, resources, cgroup1.CapabilityPolicyDegrade)`.
+The existing `Subsystems` method and `Subsystems()` function signatures remain
+unchanged; reports additionally include subsystems known to the configured
+hierarchy but skipped during creation or loading.
+
 ### Create a new cgroup
 
 This creates a new systemd v2 cgroup slice. Systemd slices consider ["-" a special character](https://www.freedesktop.org/software/systemd/man/systemd.slice.html),
