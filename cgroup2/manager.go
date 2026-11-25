@@ -194,24 +194,14 @@ func NewManager(mountpoint string, group string, resources *Resources) (*Manager
 	if err := VerifyGroupPath(group); err != nil {
 		return nil, err
 	}
-	path := filepath.Join(mountpoint, group)
-	if err := os.MkdirAll(path, defaultDirPerm); err != nil {
+	mountpoint = filepath.Clean(mountpoint)
+	path, err := secureResolve(mountpoint, filepath.Join(mountpoint, group))
+	if err != nil {
 		return nil, err
 	}
-	m := Manager{
-		unifiedMountpoint: mountpoint,
-		path:              path,
-	}
-	if err := m.ToggleControllers(resources.EnabledControllers(), Enable); err != nil {
-		// clean up cgroup dir on failure
-		os.Remove(path)
-		return nil, err
-	}
-	if err := setResources(path, resources); err != nil {
-		os.Remove(path)
-		return nil, err
-	}
-	return &m, nil
+	// Legacy behavior: an existing same-name cgroup is reused and its
+	// resource settings are overwritten rather than rejected.
+	return createCgroup(mountpoint, path, resources, reuseLegacy)
 }
 
 type InitConfig struct {
@@ -376,27 +366,13 @@ func (c *Manager) NewChild(name string, resources *Resources) (*Manager, error) 
 	if strings.HasPrefix(name, "/") {
 		return nil, errors.New("name must be relative")
 	}
-	path := filepath.Join(c.path, name)
-	if err := os.MkdirAll(path, defaultDirPerm); err != nil {
+	path, err := secureResolve(c.unifiedMountpoint, filepath.Join(c.path, name))
+	if err != nil {
 		return nil, err
 	}
-	m := Manager{
-		unifiedMountpoint: c.unifiedMountpoint,
-		path:              path,
-	}
-	if resources != nil {
-		if err := m.ToggleControllers(resources.EnabledControllers(), Enable); err != nil {
-			// clean up cgroup dir on failure
-			os.Remove(path)
-			return nil, err
-		}
-	}
-	if err := setResources(path, resources); err != nil {
-		// clean up cgroup dir on failure
-		os.Remove(path)
-		return nil, err
-	}
-	return &m, nil
+	// Legacy behavior: an existing same-name child is reused and its
+	// resource settings are overwritten rather than rejected.
+	return createCgroup(c.unifiedMountpoint, path, resources, reuseLegacy)
 }
 
 func (c *Manager) AddProc(pid uint64) error {
@@ -498,6 +474,14 @@ func (c *Manager) fallbackKill() error {
 }
 
 func (c *Manager) Delete() error {
+	// Delete is idempotent: once the cgroup directory is gone, further
+	// calls report success instead of an error.
+	if _, err := os.Lstat(c.path); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
 	// Kernel prevents cgroups with running process from being removed,
 	// check the tree is empty.
 	//
