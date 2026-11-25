@@ -191,8 +191,14 @@ func ToResources(spec *specs.LinuxResources) *Resources {
 			convertedWeight := ConvertCPUSharesToCgroupV2Value(*shares)
 			resources.CPU.Weight = &convertedWeight
 		}
+		if quota := cpu.Quota; quota != nil {
+			resources.CPU.Quota = quota
+		}
 		if period := cpu.Period; period != nil {
-			resources.CPU.Max = NewCPUMax(cpu.Quota, period)
+			resources.CPU.Period = period
+		}
+		if cpu.Quota != nil || cpu.Period != nil {
+			resources.CPU.Max = NewCPUMax(cpu.Quota, cpu.Period)
 		}
 	}
 	if mem := spec.Memory; mem != nil {

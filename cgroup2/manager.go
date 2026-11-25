@@ -151,24 +151,33 @@ type Value struct {
 	value    interface{}
 }
 
-// write the value to the full, absolute path, of a unified hierarchy
-func (c *Value) write(path string, perm os.FileMode) error {
-	var data []byte
+// bytes encodes the value without touching the filesystem. Sharing this
+// encoding keeps the historical direct-write path and the transactional update
+// path identical.
+func (c *Value) bytes() ([]byte, error) {
 	switch t := c.value.(type) {
 	case uint64:
-		data = []byte(strconv.FormatUint(t, 10))
+		return []byte(strconv.FormatUint(t, 10)), nil
 	case uint16:
-		data = []byte(strconv.FormatUint(uint64(t), 10))
+		return []byte(strconv.FormatUint(uint64(t), 10)), nil
 	case int64:
-		data = []byte(strconv.FormatInt(t, 10))
+		return []byte(strconv.FormatInt(t, 10)), nil
 	case []byte:
-		data = t
+		return t, nil
 	case string:
-		data = []byte(t)
+		return []byte(t), nil
 	case CPUMax:
-		data = []byte(t)
+		return []byte(t), nil
 	default:
-		return ErrInvalidFormat
+		return nil, ErrInvalidFormat
+	}
+}
+
+// write the value to the full, absolute path, of a unified hierarchy
+func (c *Value) write(path string, perm os.FileMode) error {
+	data, err := c.bytes()
+	if err != nil {
+		return err
 	}
 
 	return os.WriteFile(
@@ -192,6 +201,9 @@ func NewManager(mountpoint string, group string, resources *Resources) (*Manager
 		return nil, errors.New("resources reference is nil")
 	}
 	if err := VerifyGroupPath(group); err != nil {
+		return nil, err
+	}
+	if err := resources.Validate(); err != nil {
 		return nil, err
 	}
 	path := filepath.Join(mountpoint, group)
@@ -250,10 +262,42 @@ func Load(group string, opts ...InitOpts) (*Manager, error) {
 type Manager struct {
 	unifiedMountpoint string
 	path              string
+
+	// mu serializes updates and deletes through this Manager handle. Updates
+	// for the same absolute cgroup path are additionally serialized across
+	// Manager handles by lockCgroupPath.
+	mu sync.Mutex
+	// Ops is an optional filesystem backend. It is intended for tests and
+	// alternate backends; nil selects the real cgroup directory.
+	Ops FSOps
+	// ops is the internal test seam. When set it takes precedence over Ops.
+	ops     FSOps
+	fs      any
+	fileOps any
+	backend any
+}
+
+// fsOpsLocked returns the file operations handle. The caller must hold c.mu.
+func (c *Manager) fsOpsLocked() fsOps {
+	if c.ops != nil {
+		return c.ops
+	}
+	if c.Ops != nil {
+		return c.Ops
+	}
+	for _, candidate := range []any{c.fs, c.fileOps, c.backend} {
+		if ops, ok := candidate.(fsOps); ok {
+			return ops
+		}
+	}
+	return dirFSOps{dir: c.path}
 }
 
 func setResources(path string, resources *Resources) error {
 	if resources != nil {
+		if err := resources.Validate(); err != nil {
+			return err
+		}
 		if err := writeValues(path, resources.Values()); err != nil {
 			return err
 		}
@@ -311,8 +355,31 @@ func (c *Manager) Controllers() ([]string, error) {
 	return strings.Fields(string(b)), nil
 }
 
+// Update changes the cgroup resources transactionally.
+//
+// All values are validated and snapshotted before any control file is written.
+// If a write fails, control files already changed by this call are restored to
+// their snapshot values in reverse order. When rollback cannot fully restore
+// the group, the returned error is a *RollbackError listing every file that
+// remains unrestored and its current value.
+//
+// Updates to the same cgroup path are serialized, including updates made
+// through different Manager handles. The historical Update signature is
+// unchanged.
 func (c *Manager) Update(resources *Resources) error {
-	return setResources(c.path, resources)
+	if resources == nil {
+		return nil
+	}
+	if err := resources.Validate(); err != nil {
+		return err
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	unlockPath := lockCgroupPath(c.path)
+	defer unlockPath()
+
+	return updateResources(c.fsOpsLocked(), resources)
 }
 
 type ControllerToggle int
@@ -377,6 +444,11 @@ func (c *Manager) NewChild(name string, resources *Resources) (*Manager, error) 
 		return nil, errors.New("name must be relative")
 	}
 	path := filepath.Join(c.path, name)
+	if resources != nil {
+		if err := resources.Validate(); err != nil {
+			return nil, err
+		}
+	}
 	if err := os.MkdirAll(path, defaultDirPerm); err != nil {
 		return nil, err
 	}
@@ -498,6 +570,11 @@ func (c *Manager) fallbackKill() error {
 }
 
 func (c *Manager) Delete() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	unlockPath := lockCgroupPath(c.path)
+	defer unlockPath()
+
 	// Kernel prevents cgroups with running process from being removed,
 	// check the tree is empty.
 	//

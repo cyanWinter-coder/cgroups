@@ -48,6 +48,12 @@ func NewCPUMax(quota *int64, period *uint64) CPUMax {
 
 type CPU struct {
 	Weight *uint64
+	// Quota and Period are optional convenience fields. When either is set
+	// and Max is empty, they are encoded as cpu.max through NewCPUMax.
+	// A nil Quota together with a non-nil Period means "max" quota for that
+	// period, matching NewCPUMax.
+	Quota  *int64
+	Period *uint64
 	Max    CPUMax
 	Cpus   string
 	Mems   string
@@ -94,6 +100,11 @@ func (r *CPU) Values() (o []Value) {
 		o = append(o, Value{
 			filename: "cpu.max",
 			value:    r.Max,
+		})
+	} else if r.Quota != nil || r.Period != nil {
+		o = append(o, Value{
+			filename: "cpu.max",
+			value:    NewCPUMax(r.Quota, r.Period),
 		})
 	}
 	if r.Cpus != "" {

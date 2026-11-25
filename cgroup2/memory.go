@@ -25,35 +25,45 @@ type Memory struct {
 	OOMGroup *bool
 }
 
+// memoryLimitValue preserves the historical negative-means-unlimited
+// convention while writing the cgroup v2 "max" token that the kernel accepts.
+// Nil fields are handled by the caller and are therefore not passed here.
+func memoryLimitValue(v int64) interface{} {
+	if v < 0 {
+		return "max"
+	}
+	return v
+}
+
 func (r *Memory) Values() (o []Value) {
 	if r.Swap != nil {
 		o = append(o, Value{
 			filename: "memory.swap.max",
-			value:    *r.Swap,
+			value:    memoryLimitValue(*r.Swap),
 		})
 	}
 	if r.Min != nil {
 		o = append(o, Value{
 			filename: "memory.min",
-			value:    *r.Min,
+			value:    memoryLimitValue(*r.Min),
 		})
 	}
 	if r.Max != nil {
 		o = append(o, Value{
 			filename: "memory.max",
-			value:    *r.Max,
+			value:    memoryLimitValue(*r.Max),
 		})
 	}
 	if r.Low != nil {
 		o = append(o, Value{
 			filename: "memory.low",
-			value:    *r.Low,
+			value:    memoryLimitValue(*r.Low),
 		})
 	}
 	if r.High != nil {
 		o = append(o, Value{
 			filename: "memory.high",
-			value:    *r.High,
+			value:    memoryLimitValue(*r.High),
 		})
 	}
 	if r.OOMGroup != nil {
